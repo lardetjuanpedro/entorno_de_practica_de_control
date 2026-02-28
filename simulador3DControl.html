@@ -1,0 +1,1208 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Entorno de Práctica de Control (todo en uno)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Blockly core y generador JavaScript -->
+    <script src="https://unpkg.com/blockly/blockly.min.js"></script>
+    <script src="https://unpkg.com/blockly/javascript_compressed.js"></script>
+    <script src="https://unpkg.com/blockly/msg/es.js"></script>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        html, body { height:100%; font-family:'Segoe UI', sans-serif; }
+        .main-container { display:grid; grid-template-rows:1fr auto auto auto; height:100vh; width:100vw; background:#2d2d2d; }
+        .panels { display:grid; grid-template-columns:50% 50%; overflow:hidden; background:#1e1e1e; }
+        #simulation-canvas { width:100%; height:100%; background:#3a3a3a; border:2px solid #555; box-shadow:inset 0 0 10px rgba(0,0,0,0.5); }
+        #blockly-area { width:100%; height:100%; background:#2b2b2b; border-left:3px solid #007acc; overflow:hidden; }
+        .control-bar { background:#3c3c3c; padding:12px 20px; display:flex; gap:15px; align-items:center; border-top:2px solid #007acc; border-bottom:2px solid #007acc; color:white; flex-wrap:wrap; }
+        .control-bar select, .control-bar button { padding:8px 16px; font-size:1rem; border-radius:4px; border:none; cursor:pointer; background:#555; color:white; transition:background 0.2s; }
+        .control-bar select { min-width:180px; background:#444; }
+        .control-bar button { background:#007acc; font-weight:bold; }
+        .control-bar button:hover { background:#005f9e; }
+        .param-panel { background:#2a2a2a; padding:10px 20px; display:flex; gap:20px; flex-wrap:wrap; color:#ddd; border-bottom:1px solid #444; }
+        .param-panel label { display:flex; align-items:center; gap:5px; }
+        .param-panel input[type=range] { width:120px; }
+        .param-panel span.value { min-width:40px; display:inline-block; text-align:right; }
+        .footer { background:#1e1e1e; color:#ccc; padding:8px 20px; font-family:monospace; font-size:1.1rem; border-top:1px solid #444; display:flex; gap:30px; flex-wrap:wrap; }
+        .footer span { color:#00ccff; }
+        #error-info { color:#ff6666; margin-left:auto; }
+        @media (max-width:800px) {
+            .panels { grid-template-columns:1fr; grid-template-rows:50% 50%; }
+            #blockly-area { border-left:none; border-top:3px solid #007acc; }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="panels">
+            <div id="simulation-canvas"></div>
+            <div id="blockly-area"></div>
+        </div>
+        <div class="control-bar">
+            <label for="system-selector" style="color:white;">Sistema:</label>
+            <select id="system-selector">
+                <option value="sistemaPendulo1D">Péndulo invertido 1D (cart-pole)</option>
+                <option value="sistemaPendulo2D">Péndulo invertido 2D (esférico)</option>
+                <option value="sistemaBalancin">Balancín con bola</option>
+            </select>
+            <button id="btn-start">▶ Iniciar simulación</button>
+            <button id="btn-stop">⏹️ Detener</button>
+            <button id="btn-reset">↺ Reiniciar</button>
+            <button id="btn-perturb">💥 Aplicar perturbación</button>
+            <label>Magnitud: <input type="range" id="perturb-mag" min="0" max="5" step="0.1" value="1.0"></label>
+        </div>
+        <div class="param-panel" id="param-panel">
+            <!-- Los controles de parámetros se generan dinámicamente -->
+        </div>
+        <div class="footer" id="status-footer">
+            <div>Estado: <span id="sim-status">Detenida</span></div>
+            <div>Señal de control: <span id="control-signal">0.00</span></div>
+            <div>Información: <span id="system-info">-</span></div>
+            <div id="error-info"></div>
+        </div>
+    </div>
+
+    <!-- ==================== CÓDIGO FUENTE EMPOTRADO ==================== -->
+    <!-- motor3d.js -->
+    <script>
+// motor3d.js
+// Motor de simulación mejorado con logs de depuración, manejo de dt real,
+// actualización dinámica de dropdown de estado y persistencia del workspace.
+// Incluye manejo robusto de errores de Blockly y fallback para generadores faltantes.
+
+class SistemaBase {
+    init(scene) { throw new Error('Implementar init()'); }
+    update(dt, controlSignal) { throw new Error('Implementar update()'); }
+    getState() { throw new Error('Implementar getState()'); }
+    applyPerturbation(force) { throw new Error('Implementar applyPerturbation()'); }
+    reset(initialState) { throw new Error('Implementar reset()'); }
+    updateVisuals() { throw new Error('Implementar updateVisuals()'); }
+    destroy() { /* opcional */ }
+    getParamDefinitions() { return []; }
+    setParam(name, value) { this[name] = value; }
+}
+
+class MotorSimulacion {
+    constructor() {
+        this.scene = null;
+        this.camera = null;
+        this.renderer = null;
+        this.workspace = null;
+        this.sistemaActual = null;
+        this.funcionControl = null;
+        this.enEjecucion = false;
+        this.ultimoTiempo = 0;
+        this.dtMax = 0.02;
+        this.velocidadSimulacion = 1.0;
+        this.statusElem = null;
+        this.infoElem = null;
+        this.controlSignalElem = null;
+        this.errorElem = null; // Nuevo: para mostrar errores
+        this.paramPanel = null;
+        this.animationFrame = null;
+        this.ultimoControl = 0;
+        // Almacenar XML del workspace para posible restauración
+        this.workspaceXML = null;
+        // Para evitar definir generadores de fallback múltiples veces
+        this.fallbackGeneratorsDefined = false;
+    }
+
+    inicializar(scene, camera, renderer, workspace) {
+        this.scene = scene;
+        this.camera = camera;
+        this.renderer = renderer;
+        this.workspace = workspace;
+        this._initPerturbationListener();
+        this._onBlocklyChange = this._onBlocklyChange.bind(this);
+        if (workspace) {
+            workspace.addChangeListener(this._onBlocklyChange);
+        }
+        // Inicializar estado global para PID
+        window.pidState = {};
+    }
+
+    setUIElements(statusElem, infoElem, controlSignalElem, errorElem) {
+        this.statusElem = statusElem;
+        this.infoElem = infoElem;
+        this.controlSignalElem = controlSignalElem;
+        this.errorElem = errorElem;
+    }
+
+    setParamPanel(panel) {
+        this.paramPanel = panel;
+    }
+
+    // Nuevo método: actualiza los dropdowns de los bloques 'estado_variable'
+    actualizarDropdownEstado() {
+        if (!this.workspace) return;
+        const bloques = this.workspace.getAllBlocks().filter(b => b.type === 'estado_variable');
+        if (bloques.length === 0) return;
+        const estado = this.sistemaActual ? this.sistemaActual.getState() : {};
+        const opciones = Object.keys(estado).map(key => [key, key]);
+        bloques.forEach(bloque => {
+            const field = bloque.getField('VAR');
+            if (field) {
+                // Actualizar las opciones del dropdown
+                field.menuGenerator_ = opciones;
+                // Si el valor actual no está en las nuevas opciones, seleccionar la primera
+                if (opciones.length > 0 && !opciones.some(opt => opt[1] === field.getValue())) {
+                    field.setValue(opciones[0][1]);
+                }
+            }
+        });
+    }
+
+    async cargarSistema(nombre, config = {}) {
+        // Guardar workspace actual antes de limpiar
+        if (this.workspace) {
+            this.workspaceXML = Blockly.Xml.domToText(Blockly.Xml.workspaceToDom(this.workspace));
+        }
+
+        if (this.sistemaActual) {
+            this.sistemaActual.destroy();
+        }
+        if (window.Sistemas && window.Sistemas[nombre]) {
+            const ClaseSistema = window.Sistemas[nombre];
+            this.sistemaActual = new ClaseSistema(config);
+            this.sistemaActual.init(this.scene);
+            this.sistemaActual.reset(config.estadoInicial);
+            console.log(`Sistema ${nombre} cargado.`);
+        } else {
+            await this._cargarScript(nombre);
+            if (window.Sistemas && window.Sistemas[nombre]) {
+                const ClaseSistema = window.Sistemas[nombre];
+                this.sistemaActual = new ClaseSistema(config);
+                this.sistemaActual.init(this.scene);
+                this.sistemaActual.reset(config.estadoInicial);
+                console.log(`Sistema ${nombre} cargado (carga dinámica).`);
+            } else {
+                alert(`No se pudo cargar el sistema "${nombre}".`);
+            }
+        }
+
+        // Actualizar dropdown de estado
+        this.actualizarDropdownEstado();
+
+        // Restaurar workspace si es posible usando DOMParser (más compatible)
+        if (this.workspaceXML && this.workspace) {
+            try {
+                const parser = new DOMParser();
+                const dom = parser.parseFromString(this.workspaceXML, 'text/xml');
+                this.workspace.clear();
+                Blockly.Xml.domToWorkspace(dom.documentElement, this.workspace);
+                console.log('Workspace restaurado desde XML guardado.');
+            } catch (e) {
+                console.warn('No se pudo restaurar el workspace anterior, cargando ejemplo por defecto.', e);
+                this.cargarEjemploBlockly();
+            }
+        } else {
+            this.cargarEjemploBlockly();
+        }
+
+        // Reiniciar estado de PID global al cambiar de sistema
+        window.pidState = {};
+    }
+
+    _cargarScript(nombre) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = `sistemas/${nombre}.js`;
+            script.onload = resolve;
+            script.onerror = () => reject(new Error(`Error al cargar ${nombre}.js`));
+            document.head.appendChild(script);
+        });
+    }
+
+    _onBlocklyChange(event) {
+        const relevantes = ['change', 'create', 'delete', 'move'];
+        if (relevantes.includes(event.type)) {
+            this._actualizarControlDesdeBlockly();
+        }
+    }
+
+    // Define generadores de fallback para bloques que no tengan generador JavaScript
+    _definirFallbackGenerators() {
+        if (this.fallbackGeneratorsDefined) return;
+        // Verificar que el generador exista en la API moderna
+        if (typeof javascript === 'undefined' || !javascript.javascriptGenerator) return;
+
+        const blockTypes = ['fijar_control', 'estado_variable', 'pid_control', 'setpoint', 'constante'];
+        blockTypes.forEach(type => {
+            if (!javascript.javascriptGenerator.forBlock[type]) {
+                console.warn(`Definiendo fallback para bloque '${type}'.`);
+                javascript.javascriptGenerator.forBlock[type] = function(block, generator) {
+                    if (block.outputConnection) {
+                        return ['0', javascript.javascriptGenerator.ORDER_ATOMIC];
+                    } else {
+                        return '';
+                    }
+                };
+            }
+        });
+        this.fallbackGeneratorsDefined = true;
+    }
+
+
+    _actualizarControlDesdeBlockly() {
+        if (!this.workspace) return;
+
+        this._definirFallbackGenerators();
+
+        try {
+            if (typeof javascript === 'undefined' || !javascript.javascriptGenerator) {
+                throw new Error('javascriptGenerator no está disponible. Revisa la carga de scripts en el HTML.');
+            }
+
+            // Llamada a la API moderna
+            const codigo = javascript.javascriptGenerator.workspaceToCode(this.workspace);
+            console.log('Código Blockly generado:', codigo);
+            
+            const codigoCompleto = `
+                let control = 0;
+                ${codigo}
+                return control;
+            `;
+            this.funcionControl = new Function('estado', codigoCompleto);
+            console.log('Función de control actualizada');
+            if (this.errorElem) this.errorElem.textContent = '';
+        } catch (e) {
+            console.error('Error al generar función de control:', e);
+            this.funcionControl = null;
+            if (this.errorElem) this.errorElem.textContent = 'Error en bloques: ' + e.message;
+        }
+    }
+
+    _ejecutarControl(estado) {
+        if (!this.funcionControl) return 0;
+        try {
+            const control = this.funcionControl(estado);
+            if (isNaN(control) || typeof control !== 'number') {
+                throw new Error('El bloque de control no devolvió un número');
+            }
+            // Limpiar error si existía
+            if (this.errorElem) this.errorElem.textContent = '';
+            return control;
+        } catch (e) {
+            console.error('Error en función de control:', e);
+            if (this.errorElem) this.errorElem.textContent = 'Error: ' + e.message;
+            return 0;
+        }
+    }
+
+    iniciar() {
+        if (!this.sistemaActual) {
+            alert('No hay sistema cargado');
+            return;
+        }
+        if (this.enEjecucion) return;
+        this.enEjecucion = true;
+        this.ultimoTiempo = performance.now() / 1000;
+        this._loop();
+    }
+
+    detener() {
+        this.enEjecucion = false;
+        if (this.animationFrame) {
+            cancelAnimationFrame(this.animationFrame);
+            this.animationFrame = null;
+        }
+    }
+
+    reiniciar(estadoInicial) {
+        if (this.sistemaActual) {
+            this.sistemaActual.reset(estadoInicial);
+            this.actualizarDropdownEstado(); // Por si el estado cambia de estructura
+        }
+        // Limpiar estado PID global
+        window.pidState = {};
+    }
+
+    _loop() {
+        if (!this.enEjecucion) return;
+
+        const ahora = performance.now() / 1000;
+        let dt = (ahora - this.ultimoTiempo) * this.velocidadSimulacion;
+        this.ultimoTiempo = ahora;
+
+        if (dt > this.dtMax) dt = this.dtMax;
+        if (dt <= 0) dt = 1e-6;
+
+        // Exponer dt globalmente para los bloques PID
+        window.simDt = dt;
+
+        if (this.sistemaActual) {
+            const estado = this.sistemaActual.getState();
+            const control = this._ejecutarControl(estado);
+            this.ultimoControl = control;
+            this.sistemaActual.update(dt, control);
+            this.sistemaActual.updateVisuals();
+            this._actualizarUI(estado, control);
+        }
+
+        this.renderer.render(this.scene, this.camera);
+        this.animationFrame = requestAnimationFrame(this._loop.bind(this));
+    }
+
+    _actualizarUI(estado, control) {
+        if (this.statusElem) {
+            this.statusElem.textContent = this.enEjecucion ? 'Ejecutando' : 'Detenida';
+        }
+        if (this.controlSignalElem) {
+            this.controlSignalElem.textContent = control.toFixed(3);
+        }
+        if (this.infoElem && estado) {
+            const texto = Object.entries(estado)
+                .map(([k, v]) => `${k}: ${v.toFixed(2)}`)
+                .join(' ');
+            this.infoElem.textContent = texto || '-';
+        }
+    }
+
+    _initPerturbationListener() {
+        if (!this.renderer) return;
+        const canvas = this.renderer.domElement;
+        let dragging = false;
+        let startPoint = new THREE.Vector2();
+
+        canvas.addEventListener('mousedown', (event) => {
+            dragging = true;
+            const rect = canvas.getBoundingClientRect();
+            startPoint.set(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1
+            );
+        });
+
+        canvas.addEventListener('mouseup', (event) => {
+            if (!dragging || !this.sistemaActual) return;
+            dragging = false;
+            const rect = canvas.getBoundingClientRect();
+            const endPoint = new THREE.Vector2(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1
+            );
+            // Calcular vector de desplazamiento (en coordenadas normalizadas)
+            const delta = new THREE.Vector2().subVectors(endPoint, startPoint);
+            // Escalar para obtener una magnitud razonable
+            const magnitud = delta.length() * 5; // factor empírico
+            if (magnitud > 0.1) {
+                // Aplicar perturbación en la dirección del arrastre
+                this.sistemaActual.applyPerturbation(delta.clone().multiplyScalar(magnitud));
+            }
+        });
+
+        // También mantener el clic simple como respaldo (opcional)
+        canvas.addEventListener('click', (event) => {
+            if (dragging) return; // ya manejado por mouseup
+            if (!this.sistemaActual) return;
+            const rect = canvas.getBoundingClientRect();
+            const point = new THREE.Vector2(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1
+            );
+            // Aplicar perturbación pequeña en dirección aleatoria?
+            // Por ahora, aplicamos una perturbación radial simple
+            const magnitud = 0.5;
+            this.sistemaActual.applyPerturbation(point.clone().multiplyScalar(magnitud));
+        });
+    }
+
+    aplicarPerturbacionManual(magnitud) {
+        if (!this.sistemaActual) return;
+        const angulo = Math.random() * 2 * Math.PI;
+        const fuerza = new THREE.Vector2(Math.cos(angulo) * magnitud, Math.sin(angulo) * magnitud);
+        this.sistemaActual.applyPerturbation(fuerza);
+    }
+
+    redimensionar(ancho, alto) {
+        if (this.camera && this.camera.isOrthographicCamera) {
+            const viewSize = 10;
+            const aspect = ancho / alto;
+            this.camera.left = -viewSize * aspect;
+            this.camera.right = viewSize * aspect;
+            this.camera.top = viewSize;
+            this.camera.bottom = -viewSize;
+            this.camera.updateProjectionMatrix();
+        } else if (this.camera && this.camera.isPerspectiveCamera) {
+            this.camera.aspect = ancho / alto;
+            this.camera.updateProjectionMatrix();
+        }
+        this.renderer.setSize(ancho, alto);
+    }
+
+    actualizarParametrosUI() {
+        if (!this.paramPanel || !this.sistemaActual) return;
+        const definiciones = this.sistemaActual.getParamDefinitions ? this.sistemaActual.getParamDefinitions() : [];
+        this.paramPanel.innerHTML = '';
+        definiciones.forEach(def => {
+            const container = document.createElement('label');
+            container.textContent = def.label + ': ';
+            const input = document.createElement('input');
+            input.type = 'range';
+            input.min = def.min;
+            input.max = def.max;
+            input.step = def.step || 0.01;
+            input.value = def.value;
+            const span = document.createElement('span');
+            span.className = 'value';
+            span.textContent = def.value.toFixed(2);
+            input.addEventListener('input', (e) => {
+                const val = parseFloat(e.target.value);
+                span.textContent = val.toFixed(2);
+                if (this.sistemaActual) {
+                    this.sistemaActual.setParam(def.name, val);
+                }
+            });
+            container.appendChild(input);
+            container.appendChild(span);
+            this.paramPanel.appendChild(container);
+        });
+    }
+
+    cargarEjemploBlockly() {
+        if (!this.workspace || !this.sistemaActual) return;
+        this.workspace.clear();
+        let xmlString = '';
+        if (this.sistemaActual.constructor.name === 'Pendulo1D') {
+            xmlString = '<xml><block type="fijar_control" x="20" y="20"><value name="VALUE"><block type="math_arithmetic"><field name="OP">MULTIPLY</field><value name="A"><block type="math_number"><field name="NUM">-2</field></block></value><value name="B"><block type="estado_variable"><field name="VAR">angulo</field></block></value></block></value></block></xml>';
+        } else if (this.sistemaActual.constructor.name === 'Pendulo2D') {
+            xmlString = '<xml><block type="fijar_control" x="20" y="20"><value name="VALUE"><block type="pid_control"><field name="P">2.0</field><field name="I">0.1</field><field name="D">0.5</field><value name="ERROR"><block type="estado_variable"><field name="VAR">anguloX</field></block></value></block></value></block></xml>';
+        } else if (this.sistemaActual.constructor.name === 'Balancin') {
+            xmlString = '<xml><block type="fijar_control" x="20" y="20"><value name="VALUE"><block type="math_arithmetic"><field name="OP">MULTIPLY</field><value name="A"><block type="math_number"><field name="NUM">-1</field></block></value><value name="B"><block type="estado_variable"><field name="VAR">angulo</field></block></value></block></value></block></xml>';
+        }
+        if (xmlString) {
+            const parser = new DOMParser();
+            const xmlDom = parser.parseFromString(xmlString, 'text/xml');
+            Blockly.Xml.domToWorkspace(xmlDom.documentElement, this.workspace);
+            this._actualizarControlDesdeBlockly();
+        }
+    }
+}
+
+window.SistemaBase = SistemaBase;
+window.motor = new MotorSimulacion();
+    </script>
+
+    <!-- sistemaPendulo1D.js -->
+    <script>
+// sistemaPendulo1D.js
+// Péndulo invertido 1D (cart-pole simplificado: péndulo sobre base fija)
+// Compatible con motor3d.js mejorado (dt real, perturbaciones vectoriales)
+
+class Pendulo1D extends SistemaBase {
+    constructor(config = {}) {
+        super();
+        this.angulo = 0;
+        this.velocidad = 0;
+        this.gravedad = config.gravedad || 9.8;
+        this.longitud = config.longitud || 2;
+        this.amortiguacion = config.amortiguacion || 0.1;
+        this.masa = config.masa || 1;
+        this.objects = [];
+        this.grupo = null;
+        this.masaMesh = null;
+    }
+
+    init(scene) {
+        const grupo = new THREE.Group();
+        const brazoGeom = new THREE.BoxGeometry(0.2, this.longitud, 0.2);
+        const brazoMat = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+        const brazo = new THREE.Mesh(brazoGeom, brazoMat);
+        brazo.position.y = this.longitud / 2;
+        grupo.add(brazo);
+
+        const masaGeom = new THREE.SphereGeometry(0.3, 16);
+        const masaMat = new THREE.MeshStandardMaterial({ color: 0xdd3333 });
+        this.masaMesh = new THREE.Mesh(masaGeom, masaMat);
+        this.masaMesh.position.y = this.longitud;
+        grupo.add(this.masaMesh);
+
+        const pivoteGeom = new THREE.CylinderGeometry(0.2, 0.2, 0.1, 8);
+        const pivoteMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+        const pivote = new THREE.Mesh(pivoteGeom, pivoteMat);
+        pivote.rotation.x = Math.PI / 2;
+        pivote.position.y = 0;
+        grupo.add(pivote);
+
+        scene.add(grupo);
+        this.grupo = grupo;
+        this.objects.push(grupo);
+    }
+
+    destroy() {
+        if (this.grupo) this.grupo.parent.remove(this.grupo);
+    }
+
+    reset(initialState) {
+        this.angulo = initialState?.angulo || 0;
+        this.velocidad = initialState?.velocidad || 0;
+        this.updateVisuals();
+    }
+
+    update(dt, controlSignal) {
+        const torque = typeof controlSignal === 'number' ? controlSignal : 0;
+        const I = this.masa * this.longitud ** 2;
+        const alpha = (-this.masa * this.gravedad * this.longitud * Math.sin(this.angulo) 
+                      - this.amortiguacion * this.velocidad + torque) / I;
+        this.velocidad += alpha * dt;
+        this.angulo += this.velocidad * dt;
+    }
+
+    getState() {
+        return { angulo: this.angulo, velocidad: this.velocidad };
+    }
+
+    applyPerturbation(force) {
+        // force es un THREE.Vector2 (dx, dy) en coordenadas normalizadas de pantalla
+        // Se interpreta como un impulso angular
+        const impulso = force.length() * 0.5;
+        // La dirección se toma de la componente X (positiva a la derecha)
+        this.velocidad += impulso * Math.sign(force.x);
+    }
+
+    updateVisuals() {
+        if (this.grupo) this.grupo.rotation.z = this.angulo;
+    }
+
+    getParamDefinitions() {
+        return [
+            { name: 'masa', label: 'Masa', min: 0.1, max: 5, value: this.masa, step: 0.1 },
+            { name: 'longitud', label: 'Longitud', min: 0.5, max: 5, value: this.longitud, step: 0.1 },
+            { name: 'gravedad', label: 'Gravedad', min: -20, max: 20, value: this.gravedad, step: 0.1 },
+            { name: 'amortiguacion', label: 'Amortiguación', min: 0, max: 2, value: this.amortiguacion, step: 0.01 }
+        ];
+    }
+
+    setParam(name, value) {
+        this[name] = value;
+        // No se requieren cálculos derivados porque la inercia se recalcula en update()
+    }
+}
+
+// Registrar globalmente
+if (!window.Sistemas) window.Sistemas = {};
+window.Sistemas.sistemaPendulo1D = Pendulo1D;
+    </script>
+
+    <!-- sistemaPendulo2D.js -->
+    <script>
+// sistemaPendulo2D.js
+// Péndulo esférico sobre carro (2 ángulos: theta (inclinación en X) y phi (inclinación en Y))
+class Pendulo2D extends SistemaBase {
+    constructor(config = {}) {
+        super();
+        // Estado: [x, vx, theta, omega_theta, phi, omega_phi]
+        this.x = 0;             // posición del carro
+        this.vx = 0;
+        this.theta = 0.1;       // ángulo respecto a vertical en plano X (rot Y)
+        this.omegaTheta = 0;
+        this.phi = 0.1;          // ángulo respecto a vertical en plano Y (rot X)
+        this.omegaPhi = 0;
+
+        // Parámetros
+        this.masaCarro = config.masaCarro || 1.0;
+        this.masaPendulo = config.masaPendulo || 0.5;
+        this.longitud = config.longitud || 2.0;
+        this.gravedad = config.gravedad || 9.8;
+        this.amortiguacionCarro = config.amortiguacionCarro || 0.1;
+        this.amortiguacionAngular = config.amortiguacionAngular || 0.05; // para theta y phi
+
+        // Visuales
+        this.grupoCarro = null;
+        this.grupoPendulo = null;
+        this.masaMesh = null;
+        this.barraMesh = null;
+    }
+
+    init(scene) {
+        // Grupo carro (se mueve en X)
+        const carro = new THREE.Group();
+        const carroGeom = new THREE.BoxGeometry(1.0, 0.3, 0.8);
+        const carroMat = new THREE.MeshStandardMaterial({ color: 0x44aa88 });
+        const carroMesh = new THREE.Mesh(carroGeom, carroMat);
+        carro.add(carroMesh);
+        // Ruedas (opcional)
+        const ruedaGeom = new THREE.CylinderGeometry(0.2, 0.2, 0.2, 8);
+        const ruedaMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+        const rueda1 = new THREE.Mesh(ruedaGeom, ruedaMat);
+        rueda1.rotation.z = Math.PI/2;
+        rueda1.position.set(-0.5, -0.25, 0.4);
+        carro.add(rueda1);
+        const rueda2 = rueda1.clone();
+        rueda2.position.set(0.5, -0.25, 0.4);
+        carro.add(rueda2);
+        const rueda3 = rueda1.clone();
+        rueda3.position.set(-0.5, -0.25, -0.4);
+        carro.add(rueda3);
+        const rueda4 = rueda1.clone();
+        rueda4.position.set(0.5, -0.25, -0.4);
+        carro.add(rueda4);
+        scene.add(carro);
+        this.grupoCarro = carro;
+
+        // Grupo péndulo (se adjunta al carro)
+        const pendulo = new THREE.Group();
+        // Barra
+        const barraGeom = new THREE.CylinderGeometry(0.1, 0.1, this.longitud, 8);
+        const barraMat = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+        const barra = new THREE.Mesh(barraGeom, barraMat);
+        barra.position.y = -this.longitud/2; // El pivote está en la parte superior (en el carro), la barra cuelga hacia abajo
+        barra.rotation.x = 0; // se rotará mediante el grupo
+        pendulo.add(barra);
+        this.barraMesh = barra;
+
+        // Masa
+        const masaGeom = new THREE.SphereGeometry(0.3, 16);
+        const masaMat = new THREE.MeshStandardMaterial({ color: 0xdd3333 });
+        const masa = new THREE.Mesh(masaGeom, masaMat);
+        masa.position.y = -this.longitud;
+        pendulo.add(masa);
+        this.masaMesh = masa;
+
+        // Unión (esfera pequeña en el pivote)
+        const unionGeom = new THREE.SphereGeometry(0.15, 8);
+        const unionMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+        const union = new THREE.Mesh(unionGeom, unionMat);
+        union.position.y = 0;
+        pendulo.add(union);
+
+        carro.add(pendulo);
+        this.grupoPendulo = pendulo;
+
+        // Ajustar posición inicial del carro
+        carro.position.x = this.x;
+    }
+
+    destroy() {
+        if (this.grupoCarro) this.grupoCarro.parent.remove(this.grupoCarro);
+    }
+
+    reset(initialState) {
+        if (initialState) {
+            this.x = initialState.x || 0;
+            this.vx = initialState.vx || 0;
+            this.theta = initialState.theta || 0.1;
+            this.omegaTheta = initialState.omegaTheta || 0;
+            this.phi = initialState.phi || 0.1;
+            this.omegaPhi = initialState.omegaPhi || 0;
+        } else {
+            this.x = 0;
+            this.vx = 0;
+            this.theta = 0.1;
+            this.omegaTheta = 0;
+            this.phi = 0.1;
+            this.omegaPhi = 0;
+        }
+        this.updateVisuals();
+    }
+
+    update(dt, controlSignal) {
+        const F = typeof controlSignal === 'number' ? controlSignal : 0;
+
+        // Constantes
+        const M = this.masaCarro;
+        const m = this.masaPendulo;
+        const L = this.longitud;
+        const g = this.gravedad;
+        const b_c = this.amortiguacionCarro;   // fricción del carro
+        const b_a = this.amortiguacionAngular; // fricción angular (para ambos ejes)
+
+        // Variables de estado
+        let theta = this.theta;
+        let phi = this.phi;
+        let thetaDot = this.omegaTheta;
+        let phiDot = this.omegaPhi;
+        let xDot = this.vx;
+
+        const sθ = Math.sin(theta);
+        const cθ = Math.cos(theta);
+        const sφ = Math.sin(phi);
+        const cφ = Math.cos(phi);
+
+        // Ecuaciones derivadas en motor3d.js (modelo completo)
+        // (A) θddot
+        const numeradorTheta = (M+m)*g*sθ*cφ - (M+m)*L*cθ*sθ*phiDot*phiDot - m*L*sθ*cθ*thetaDot*thetaDot - F*cθ;
+        const denominadorTheta = L * (M + m*sθ*sθ);
+        let thetaDdot = numeradorTheta / denominadorTheta;
+
+        // (B) φddot
+        let phiDdot = (2 * sθ * thetaDot * phiDot + (g/L) * sφ) / cθ;
+
+        // (C) xddot (usamos la ecuación de cantidad de movimiento)
+        // De la ecuación (1): cθ xddot = g sθ cφ - L θddot - L cθ sθ φdot^2
+        let xDdot = (g * sθ * cφ - L * thetaDdot - L * cθ * sθ * phiDot*phiDot) / cθ;
+
+        // Añadir amortiguación (fricción)
+        thetaDdot -= b_a * thetaDot;
+        phiDdot -= b_a * phiDot;
+        xDdot -= b_c * xDot / (M+m); // fricción proporcional a velocidad
+
+        // Integración
+        this.omegaTheta += thetaDdot * dt;
+        this.omegaPhi += phiDdot * dt;
+        this.vx += xDdot * dt;
+        this.theta += this.omegaTheta * dt;
+        this.phi += this.omegaPhi * dt;
+        this.x += this.vx * dt;
+
+        // Normalizar ángulos (opcional)
+        // this.theta = this.theta % (2*Math.PI);
+        // this.phi = this.phi % (2*Math.PI);
+    }
+
+    getState() {
+        return {
+            x: this.x,
+            vx: this.vx,
+            anguloX: this.theta,   // rotación en X (theta)
+            anguloY: this.phi,      // rotación en Y (phi)
+            velocidadX: this.omegaTheta,
+            velocidadY: this.omegaPhi
+        };
+    }
+
+    applyPerturbation(force) {
+        // force es un Vector2 (dx, dy) en el plano de la pantalla
+        // Lo interpretamos como un impulso en el carro (en X) y un torque en los ángulos
+        const impulsoCarro = force.x * 0.2;
+        const impulsoTheta = force.y * 0.1;  // afecta theta
+        const impulsoPhi = force.x * 0.1;     // afecta phi (para variar)
+        this.vx += impulsoCarro;
+        this.omegaTheta += impulsoTheta;
+        this.omegaPhi += impulsoPhi;
+    }
+
+    updateVisuals() {
+        if (this.grupoCarro) {
+            this.grupoCarro.position.x = this.x;
+            // Rotación del péndulo: primero rotamos en Y (theta) y luego en X (phi)
+            // El orden es importante: queremos que theta incline en dirección X, phi en dirección Y.
+            // Usamos rotaciones de Euler: YXZ?
+            this.grupoPendulo.rotation.x = this.phi;    // rotación alrededor de X (inclina en Y)
+            this.grupoPendulo.rotation.y = this.theta;  // rotación alrededor de Y (inclina en X)
+            // Nota: El orden de las rotaciones puede causar efectos de acoplamiento visual,
+            // pero para pequeñas amplitudes es aceptable.
+        }
+    }
+
+    getParamDefinitions() {
+        return [
+            { name: 'masaCarro', label: 'Masa carro', min: 0.5, max: 5, value: this.masaCarro, step: 0.1 },
+            { name: 'masaPendulo', label: 'Masa péndulo', min: 0.1, max: 3, value: this.masaPendulo, step: 0.1 },
+            { name: 'longitud', label: 'Longitud', min: 0.5, max: 5, value: this.longitud, step: 0.1 },
+            { name: 'gravedad', label: 'Gravedad', min: -20, max: 20, value: this.gravedad, step: 0.1 },
+            { name: 'amortiguacionCarro', label: 'Amort. carro', min: 0, max: 2, value: this.amortiguacionCarro, step: 0.01 },
+            { name: 'amortiguacionAngular', label: 'Amort. angular', min: 0, max: 1, value: this.amortiguacionAngular, step: 0.01 }
+        ];
+    }
+
+    setParam(name, value) {
+        this[name] = value;
+    }
+}
+
+// Registrar
+if (!window.Sistemas) window.Sistemas = {};
+window.Sistemas.sistemaPendulo2D = Pendulo2D;
+    </script>
+
+    <!-- sistemaBalancin.js -->
+    <script>
+// sistemaBalancin.js
+// Balancín (seesaw) con una bola que rueda (simplificado como masa puntual)
+class Balancin extends SistemaBase {
+    constructor(config = {}) {
+        super();
+        // Estado: ángulo del balancín (theta), velocidad angular, posición de la bola (s) sobre la viga, velocidad de la bola
+        this.theta = 0.0;
+        this.omega = 0.0;
+        this.s = 0.0;          // posición de la bola medida desde el centro (pivote), rango [-L/2, L/2]
+        this.vs = 0.0;
+
+        // Parámetros
+        this.masaBalancin = config.masaBalancin || 2.0;
+        this.masaBola = config.masaBola || 0.5;
+        this.longitud = config.longitud || 4.0;   // longitud total de la viga
+        this.gravedad = config.gravedad || 9.8;
+        this.amortiguacionAngular = config.amortiguacionAngular || 0.1;
+        this.amortiguacionBola = config.amortiguacionBola || 0.05;
+        this.friccionBola = config.friccionBola || 0.1; // simple fricción lineal
+
+        // Momento de inercia del balancín (viga uniforme respecto al centro)
+        this.Ib = (1/12) * this.masaBalancin * this.longitud * this.longitud;
+
+        // Visuales
+        this.grupoBalancin = null;
+        this.bolaMesh = null;
+        this.vigaMesh = null;
+    }
+
+    init(scene) {
+        const grupo = new THREE.Group();
+
+        // Viga: una caja larga
+        const vigaGeom = new THREE.BoxGeometry(this.longitud, 0.2, 0.5);
+        const vigaMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+        const viga = new THREE.Mesh(vigaGeom, vigaMat);
+        viga.position.set(0, 0, 0); // el pivote está en el centro de la viga
+        grupo.add(viga);
+        this.vigaMesh = viga;
+
+        // Bola
+        const bolaGeom = new THREE.SphereGeometry(0.3, 16);
+        const bolaMat = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+        const bola = new THREE.Mesh(bolaGeom, bolaMat);
+        bola.position.set(this.s, 0, 0.3); // la bola se coloca sobre la viga (elevada un poco)
+        grupo.add(bola);
+        this.bolaMesh = bola;
+
+        // Pivote (un cilindro)
+        const pivoteGeom = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 8);
+        const pivoteMat = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+        const pivote = new THREE.Mesh(pivoteGeom, pivoteMat);
+        pivote.rotation.x = Math.PI/2;
+        pivote.position.set(0, -0.1, 0); // justo debajo de la viga
+        grupo.add(pivote);
+
+        scene.add(grupo);
+        this.grupoBalancin = grupo;
+    }
+
+    destroy() {
+        if (this.grupoBalancin) this.grupoBalancin.parent.remove(this.grupoBalancin);
+    }
+
+    reset(initialState) {
+        if (initialState) {
+            this.theta = initialState.theta || 0;
+            this.omega = initialState.omega || 0;
+            this.s = initialState.s || 0;
+            this.vs = initialState.vs || 0;
+        } else {
+            this.theta = 0.2;
+            this.omega = 0;
+            this.s = 0.5;
+            this.vs = 0;
+        }
+        this.updateVisuals();
+    }
+
+    update(dt, controlSignal) {
+        const torque = typeof controlSignal === 'number' ? controlSignal : 0;
+
+        const m = this.masaBola;
+        const M = this.masaBalancin;
+        const L = this.longitud;
+        const g = this.gravedad;
+        const I = this.Ib; // momento de inercia del balancín
+        const s = this.s;
+        const theta = this.theta;
+        const vs = this.vs;
+        const omega = this.omega;
+
+        // Ecuaciones derivadas:
+        // Para la bola: sddot = s * omega^2 - g * sin(theta) - fricción * vs
+        let sDdot = s * omega * omega - g * Math.sin(theta) - this.friccionBola * vs;
+
+        // Para el balancín: (I + m s^2) * omegadot + 2 m s vs omega + m g s cos(theta) = torque - amortiguación*omega
+        let denom = I + m * s * s;
+        let omegaDot = (torque - 2 * m * s * vs * omega - m * g * s * Math.cos(theta) - this.amortiguacionAngular * omega) / denom;
+
+        // Integración
+        this.vs += sDdot * dt;
+        this.omega += omegaDot * dt;
+        this.s += this.vs * dt;
+        this.theta += this.omega * dt;
+
+        // Limitar la posición de la bola a los extremos de la viga
+        const limite = L/2 - 0.3; // margen para que la bola no se salga visualmente
+        if (this.s > limite) {
+            this.s = limite;
+            this.vs = 0; // choque inelástico
+        } else if (this.s < -limite) {
+            this.s = -limite;
+            this.vs = 0;
+        }
+    }
+
+    getState() {
+        return {
+            angulo: this.theta,
+            velocidadAngular: this.omega,
+            posicionBola: this.s,
+            velocidadBola: this.vs
+        };
+    }
+
+    applyPerturbation(force) {
+        // Interpretamos force como un impulso en la bola (en dirección x) y un torque en el balancín
+        this.vs += force.x * 0.2;
+        this.omega += force.y * 0.1;
+    }
+
+    updateVisuals() {
+        if (this.grupoBalancin) {
+            this.grupoBalancin.rotation.z = this.theta; // rotación en el plano XY (vista frontal)
+            if (this.bolaMesh) {
+                this.bolaMesh.position.x = this.s;
+                // Ajustar altura para que parezca que está sobre la viga
+                // La viga tiene grosor, la bola se eleva ligeramente
+                this.bolaMesh.position.y = 0.2; // por encima de la viga
+            }
+        }
+    }
+
+    getParamDefinitions() {
+        return [
+            { name: 'masaBalancin', label: 'Masa balancín', min: 0.5, max: 10, value: this.masaBalancin, step: 0.1 },
+            { name: 'masaBola', label: 'Masa bola', min: 0.1, max: 5, value: this.masaBola, step: 0.1 },
+            { name: 'longitud', label: 'Longitud', min: 1, max: 8, value: this.longitud, step: 0.1 },
+            { name: 'gravedad', label: 'Gravedad', min: -20, max: 20, value: this.gravedad, step: 0.1 },
+            { name: 'amortiguacionAngular', label: 'Amort. angular', min: 0, max: 2, value: this.amortiguacionAngular, step: 0.01 },
+            { name: 'friccionBola', label: 'Fricción bola', min: 0, max: 1, value: this.friccionBola, step: 0.01 }
+        ];
+    }
+
+    setParam(name, value) {
+        this[name] = value;
+        // Recalcular momento de inercia si cambia la masa o longitud
+        if (name === 'masaBalancin' || name === 'longitud') {
+            this.Ib = (1/12) * this.masaBalancin * this.longitud * this.longitud;
+        }
+    }
+}
+
+// Registrar
+if (!window.Sistemas) window.Sistemas = {};
+window.Sistemas.sistemaBalancin = Balancin;
+    </script>
+
+    <!-- bloquesPersonalizados.js -->
+    <script>
+// bloquesPersonalizados.js
+// Definición de bloques personalizados para Blockly
+// Versión con PID mejorado y generador actualizado (API moderna)
+
+// Bloque para leer una variable de estado del sistema actual
+Blockly.Blocks['estado_variable'] = {
+    init: function() {
+        this.appendDummyInput()
+            .appendField('estado')
+            .appendField(new Blockly.FieldDropdown(this.getEstadoVariables), 'VAR');
+        this.setOutput(true, 'Number');
+        this.setColour(160);
+        this.setTooltip('Lee una variable de estado del sistema actual');
+    },
+    getEstadoVariables: function() {
+        if (window.motor && window.motor.sistemaActual) {
+            const estado = window.motor.sistemaActual.getState();
+            return Object.keys(estado).map(key => [key, key]);
+        }
+        return [['angulo', 'angulo'], ['velocidad', 'velocidad']];
+    }
+};
+
+javascript.javascriptGenerator.forBlock['estado_variable'] = function(block, generator) {
+    var variable = block.getFieldValue('VAR');
+    var code = 'estado.' + variable;
+    return [code, javascript.javascriptGenerator.ORDER_MEMBER];
+};
+
+// Bloque para fijar la señal de control (sentencia)
+Blockly.Blocks['fijar_control'] = {
+    init: function() {
+        this.appendValueInput('VALUE')
+            .appendField('fijar control =');
+        this.setPreviousStatement(true);
+        this.setNextStatement(true);
+        this.setColour(65);
+        this.setTooltip('Establece el valor de la señal de control');
+    }
+};
+
+javascript.javascriptGenerator.forBlock['fijar_control'] = function(block, generator) {
+    var value = generator.valueToCode(block, 'VALUE', javascript.javascriptGenerator.ORDER_ASSIGNMENT) || '0';
+    var code = 'control = ' + value + ';\n';
+    return code;
+};
+
+// Bloque PID mejorado
+Blockly.Blocks['pid_control'] = {
+    init: function() {
+        this.appendValueInput('ERROR')
+            .appendField('PID error');
+        this.appendDummyInput()
+            .appendField('Kp')
+            .appendField(new Blockly.FieldNumber(1, 0), 'P')
+            .appendField('Ki')
+            .appendField(new Blockly.FieldNumber(0, 0), 'I')
+            .appendField('Kd')
+            .appendField(new Blockly.FieldNumber(0, 0), 'D');
+        this.setOutput(true, 'Number');
+        this.setColour(230);
+        this.setTooltip('Controlador PID con paso de tiempo real');
+    }
+};
+
+javascript.javascriptGenerator.forBlock['pid_control'] = function(block, generator) {
+    var error = generator.valueToCode(block, 'ERROR', javascript.javascriptGenerator.ORDER_COMMA) || '0';
+    var kp = block.getFieldValue('P');
+    var ki = block.getFieldValue('I');
+    var kd = block.getFieldValue('D');
+    var blockId = block.id;
+    var code = `(function() {
+        var pidError = ${error};
+        var dt = window.simDt || 0.02;
+        if (!window.pidState) window.pidState = {};
+        if (!window.pidState['${blockId}']) {
+            window.pidState['${blockId}'] = { integral: 0, prevError: 0 };
+        }
+        var state = window.pidState['${blockId}'];
+        state.integral += pidError * dt;
+        var integral = state.integral;
+        var deriv = (pidError - state.prevError) / dt;
+        state.prevError = pidError;
+        return ${kp} * pidError + ${ki} * integral + ${kd} * deriv;
+    })()`;
+    return [code, javascript.javascriptGenerator.ORDER_FUNCTION_CALL];
+};
+
+// Bloque setpoint
+Blockly.Blocks['setpoint'] = {
+    init: function() {
+        this.appendDummyInput()
+            .appendField('setpoint')
+            .appendField(new Blockly.FieldNumber(0, -Infinity, Infinity, 0.1), 'VALUE');
+        this.setOutput(true, 'Number');
+        this.setColour(290);
+        this.setTooltip('Valor deseado para la variable controlada');
+    }
+};
+
+javascript.javascriptGenerator.forBlock['setpoint'] = function(block, generator) {
+    var value = block.getFieldValue('VALUE');
+    return [value, javascript.javascriptGenerator.ORDER_ATOMIC];
+};
+
+// Bloque constante
+Blockly.Blocks['constante'] = {
+    init: function() {
+        this.appendDummyInput()
+            .appendField(new Blockly.FieldNumber(0, -Infinity, Infinity, 0.1), 'NUM');
+        this.setOutput(true, 'Number');
+        this.setColour(290);
+        this.setTooltip('Un número constante');
+    }
+};
+
+javascript.javascriptGenerator.forBlock['constante'] = function(block, generator) {
+    var num = block.getFieldValue('NUM');
+    return [num, javascript.javascriptGenerator.ORDER_ATOMIC];
+};
+    </script>
+
+    <!-- Código de inicialización (el mismo que en el index.html original) -->
+    <script>
+        (async function() {
+            // --- Inicialización de Three.js ---
+            const canvasDiv = document.getElementById('simulation-canvas');
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x3a3a3a);
+
+            const ancho = canvasDiv.clientWidth;
+            const alto = canvasDiv.clientHeight;
+            const aspect = ancho / alto;
+            const viewSize = 10;
+            const camera = new THREE.OrthographicCamera(
+                -viewSize * aspect, viewSize * aspect,
+                viewSize, -viewSize, 0.1, 100
+            );
+            camera.position.set(0, 0, 10);
+            camera.lookAt(0, 0, 0);
+
+            const renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(ancho, alto);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            canvasDiv.appendChild(renderer.domElement);
+
+            const luzAmbiental = new THREE.AmbientLight(0x404060);
+            scene.add(luzAmbiental);
+            const luzDir = new THREE.DirectionalLight(0xffffff, 1);
+            luzDir.position.set(1, 2, 3);
+            scene.add(luzDir);
+            scene.add(new THREE.AxesHelper(5));
+
+            // --- Inicialización de Blockly ---
+            const blocklyDiv = document.getElementById('blockly-area');
+            const toolbox = {
+                kind: 'categoryToolbox',
+                contents: [
+                    { kind: 'category', name: 'Lógica', colour: '#5C81A6', contents: [
+                        { kind: 'block', type: 'controls_if' },
+                        { kind: 'block', type: 'logic_compare' },
+                        { kind: 'block', type: 'logic_operation' },
+                        { kind: 'block', type: 'logic_boolean' }
+                    ]},
+                    { kind: 'category', name: 'Bucles', colour: '#5CA65C', contents: [
+                        { kind: 'block', type: 'controls_repeat_ext' },
+                        { kind: 'block', type: 'controls_whileUntil' }
+                    ]},
+                    { kind: 'category', name: 'Matemáticas', colour: '#5CA65C', contents: [
+                        { kind: 'block', type: 'math_number' },
+                        { kind: 'block', type: 'math_arithmetic' }
+                    ]},
+                    { kind: 'category', name: 'Variables', colour: '#FF6600', custom: 'VARIABLE' },
+                    { kind: 'category', name: 'Control', colour: '#9A5CB0', contents: [
+                        { kind: 'block', type: 'estado_variable' },
+                        { kind: 'block', type: 'fijar_control' },
+                        { kind: 'block', type: 'setpoint' },
+                        { kind: 'block', type: 'constante' }
+                    ]},
+                    { kind: 'category', name: 'PID', colour: '#CC6600', contents: [
+                        { kind: 'block', type: 'pid_control' }
+                    ]}
+                ]
+            };
+            const workspace = Blockly.inject(blocklyDiv, { toolbox: toolbox });
+
+            // --- Inicializar el motor ---
+            motor.inicializar(scene, camera, renderer, workspace);
+            motor.setUIElements(
+                document.getElementById('sim-status'),
+                document.getElementById('system-info'),
+                document.getElementById('control-signal'),
+                document.getElementById('error-info')
+            );
+            motor.setParamPanel(document.getElementById('param-panel'));
+
+            // --- Conectar controles de UI ---
+            document.getElementById('system-selector').addEventListener('change', async (e) => {
+                await motor.cargarSistema(e.target.value);
+                motor.actualizarParametrosUI();
+                // No llamar a cargarEjemploBlockly aquí porque ya se llama dentro de cargarSistema si falla restauración
+            });
+
+            document.getElementById('btn-start').addEventListener('click', () => motor.iniciar());
+            document.getElementById('btn-stop').addEventListener('click', () => motor.detener());
+            document.getElementById('btn-reset').addEventListener('click', () => motor.reiniciar());
+            document.getElementById('btn-perturb').addEventListener('click', () => {
+                const mag = parseFloat(document.getElementById('perturb-mag').value);
+                motor.aplicarPerturbacionManual(mag);
+            });
+
+            window.addEventListener('resize', () => {
+                const nuevoAncho = canvasDiv.clientWidth;
+                const nuevoAlto = canvasDiv.clientHeight;
+                motor.redimensionar(nuevoAncho, nuevoAlto);
+            });
+
+            // Cargar sistema por defecto
+            await motor.cargarSistema('sistemaPendulo1D');
+            motor.actualizarParametrosUI();
+            // El workspace ya se restauró o se cargó ejemplo dentro de cargarSistema
+        })();
+    </script>
+</body>
+</html>
