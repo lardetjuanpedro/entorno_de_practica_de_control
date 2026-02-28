@@ -1,4 +1,3 @@
-Gemini dijo
 Entorno de Practica de Control 3D interactivo con Blockly
 
 Un simulador web "todo en uno" (All-in-One) diseñado para la enseñanza, el aprendizaje y la experimentación con sistemas de control automático. Permite programar leyes de control (como controladores PID) utilizando programación visual basada en bloques y observar los resultados en tiempo real sobre sistemas dinámicos renderizados en 3D.
